@@ -102,6 +102,10 @@ type DeliverySpec struct {
 	// For exponential policy, backoff delay is backoffDelay*2^<numberOfRetries>.
 	// +optional
 	BackoffDelay *string `json:"backoffDelay,omitempty"`
+
+	// BackoffMax is the maximum delay between normal delivery attempts.
+	// +optional
+	BackoffMax *string `json:"backoffMax,omitempty"`
 }
 
 // BackoffPolicyType is the type for backoff policies
@@ -118,6 +122,51 @@ const (
 
 Channel, brokers and event sources are not required to support all these
 capabilities and are free to add more delivery options.
+
+#### Limit the retry interval
+
+Cluster operators enable `backoffMax` through the Eventing feature ConfigMap:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config-features
+  namespace: knative-eventing
+data:
+  delivery-backoff-max: "enabled"
+```
+
+Resource owners can then cap the retry interval on a Subscription. This example
+starts with a one-second exponential backoff and prevents later retries from
+waiting longer than ten minutes:
+
+```yaml
+apiVersion: messaging.knative.dev/v1
+kind: Subscription
+metadata:
+  name: orders-to-processor
+  namespace: default
+spec:
+  channel:
+    apiVersion: messaging.knative.dev/v1
+    kind: InMemoryChannel
+    name: orders
+  subscriber:
+    ref:
+      apiVersion: v1
+      kind: Service
+      name: order-processor
+  delivery:
+    retry: 100
+    backoffPolicy: exponential
+    backoffDelay: PT1S
+    backoffMax: PT10M
+```
+
+`backoffMax` limits delays calculated from `backoffDelay` and
+`backoffPolicy`. It does not limit a delay requested through a `Retry-After`
+response header; use `retryAfterMax` for that behavior.
 
 ### Exposing underlying DLC
 

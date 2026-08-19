@@ -30,6 +30,7 @@ import (
 	"knative.dev/pkg/ptr"
 
 	v1 "knative.dev/eventing/pkg/apis/duck/v1"
+	apifeature "knative.dev/eventing/pkg/apis/feature"
 )
 
 // RetryAfterFormat Enum
@@ -54,7 +55,176 @@ func TestNoRetries(t *testing.T) {
 	assert.NotNil(t, retryConfig.Backoff)
 	assert.Equal(t, time.Duration(0), retryConfig.Backoff(1, nil))
 	assert.Equal(t, time.Duration(0), retryConfig.Backoff(100, nil))
+	assert.Nil(t, retryConfig.BackoffMaxDuration)
 	assert.Nil(t, retryConfig.RetryAfterMaxDuration)
+}
+
+func TestRetryConfigBackoffMax(t *testing.T) {
+	linear := v1.BackoffPolicyLinear
+	exponential := v1.BackoffPolicyExponential
+	tests := []struct {
+		name         string
+		policy       v1.BackoffPolicyType
+		delay        string
+		backoffMax   *string
+		attempts     []int
+		wantBackoffs []time.Duration
+		wantErr      bool
+	}{
+		{
+			name:       "linear capped",
+			policy:     linear,
+			delay:      "PT3S",
+			backoffMax: ptr.String("PT10S"),
+			attempts:   []int{1, 2, 3, 4, int(^uint(0) >> 1)},
+			wantBackoffs: []time.Duration{
+				3 * time.Second,
+				6 * time.Second,
+				9 * time.Second,
+				10 * time.Second,
+				10 * time.Second,
+			},
+		},
+		{
+			name:       "exponential capped",
+			policy:     exponential,
+			delay:      "PT1S",
+			backoffMax: ptr.String("PT10S"),
+			attempts:   []int{1, 2, 3, 4, int(^uint(0) >> 1)},
+			wantBackoffs: []time.Duration{
+				2 * time.Second,
+				4 * time.Second,
+				8 * time.Second,
+				10 * time.Second,
+				10 * time.Second,
+			},
+		},
+		{
+			name:         "uncapped exponential saturates",
+			policy:       exponential,
+			delay:        "PT1S",
+			attempts:     []int{1, int(^uint(0) >> 1)},
+			wantBackoffs: []time.Duration{2 * time.Second, maxDuration},
+		},
+		{
+			name:       "zero maximum rejected",
+			policy:     exponential,
+			delay:      "PT1S",
+			backoffMax: ptr.String("PT0S"),
+			wantErr:    true,
+		},
+		{
+			name:       "invalid maximum rejected",
+			policy:     exponential,
+			delay:      "PT1S",
+			backoffMax: ptr.String("invalid"),
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config, err := RetryConfigFromDeliverySpec(v1.DeliverySpec{
+				BackoffPolicy: &tt.policy,
+				BackoffDelay:  &tt.delay,
+				BackoffMax:    tt.backoffMax,
+			})
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			if tt.backoffMax == nil {
+				assert.Nil(t, config.BackoffMaxDuration)
+			} else {
+				assert.NotNil(t, config.BackoffMaxDuration)
+			}
+			for i, attempt := range tt.attempts {
+				assert.Equal(t, tt.wantBackoffs[i], config.Backoff(attempt, nil))
+			}
+		})
+	}
+}
+
+func TestOversizedDeliveryDurationsSaturate(t *testing.T) {
+	ctx := apifeature.ToContext(context.Background(), apifeature.Flags{
+		apifeature.DeliveryBackoffMax: apifeature.Enabled,
+	})
+	largePeriod := "P300Y"
+
+	for _, policy := range []v1.BackoffPolicyType{v1.BackoffPolicyLinear, v1.BackoffPolicyExponential} {
+		t.Run(string(policy)+" backoff maximum", func(t *testing.T) {
+			delay := "PT1S"
+			spec := v1.DeliverySpec{
+				BackoffPolicy: &policy,
+				BackoffDelay:  &delay,
+				BackoffMax:    &largePeriod,
+			}
+			assert.Nil(t, spec.Validate(ctx))
+
+			config, err := RetryConfigFromDeliverySpec(spec)
+			assert.NoError(t, err)
+			assert.NotNil(t, config.BackoffMaxDuration)
+			assert.Equal(t, maxDuration, *config.BackoffMaxDuration)
+			assert.Greater(t, config.Backoff(1, nil), time.Duration(0))
+		})
+
+		t.Run(string(policy)+" backoff delay", func(t *testing.T) {
+			spec := v1.DeliverySpec{
+				BackoffPolicy: &policy,
+				BackoffDelay:  &largePeriod,
+			}
+			assert.Nil(t, spec.Validate(ctx))
+
+			config, err := RetryConfigFromDeliverySpec(spec)
+			assert.NoError(t, err)
+			assert.Equal(t, maxDuration, config.Backoff(1, nil))
+		})
+	}
+
+	config, err := RetryConfigFromDeliverySpec(v1.DeliverySpec{
+		Timeout:       &largePeriod,
+		RetryAfterMax: &largePeriod,
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, maxDuration, config.RequestTimeout)
+	assert.NotNil(t, config.RetryAfterMaxDuration)
+	assert.Equal(t, maxDuration, *config.RetryAfterMaxDuration)
+}
+
+func TestPeriodDurationMatchesLibraryWithinRange(t *testing.T) {
+	for _, value := range []string{
+		"PT0S",
+		"PT0.5S",
+		"PT1H2M3.4S",
+		"P3DT4H",
+		"P1Y2M3DT4H5M6S",
+		"-PT1.5S",
+	} {
+		t.Run(value, func(t *testing.T) {
+			p, err := period.Parse(value)
+			assert.NoError(t, err)
+			want, _ := p.Duration()
+			assert.Equal(t, want, periodDuration(p))
+		})
+	}
+}
+
+func TestBackoffMaxDoesNotCapRetryAfter(t *testing.T) {
+	policy := v1.BackoffPolicyExponential
+	config, err := RetryConfigFromDeliverySpec(v1.DeliverySpec{
+		BackoffPolicy: &policy,
+		BackoffDelay:  ptr.String("PT1S"),
+		BackoffMax:    ptr.String("PT10S"),
+		RetryAfterMax: ptr.String("PT20S"),
+	})
+	assert.NoError(t, err)
+
+	resp := &http.Response{
+		StatusCode: http.StatusServiceUnavailable,
+		Header:     http.Header{"Retry-After": []string{"30"}},
+	}
+	assert.Equal(t, 20*time.Second, generateBackoffFn(&config)(0, 0, 20, resp))
 }
 
 // Test The RetryConfigFromDeliverySpec() Functionality
