@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"knative.dev/pkg/apis"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
+	"knative.dev/pkg/ptr"
 
 	eventingduckv1 "knative.dev/eventing/pkg/apis/duck/v1"
 	"knative.dev/eventing/pkg/apis/eventing"
@@ -261,6 +262,16 @@ func WithBrokerDeliveryRetries(retry int32) BrokerOption {
 			b.Spec.Delivery = new(eventingduckv1.DeliverySpec)
 		}
 		b.Spec.Delivery.Retry = &retry
+	}
+}
+
+// WithBrokerBackoffMax sets the maximum retry backoff duration on a Broker.
+func WithBrokerBackoffMax(backoffMax string) BrokerOption {
+	return func(b *v1.Broker) {
+		if b.Spec.Delivery == nil {
+			b.Spec.Delivery = new(eventingduckv1.DeliverySpec)
+		}
+		b.Spec.Delivery.BackoffMax = ptr.String(backoffMax)
 	}
 }
 

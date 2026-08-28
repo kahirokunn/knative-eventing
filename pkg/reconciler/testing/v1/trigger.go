@@ -123,6 +123,16 @@ func WithTriggerRetry(count int32, backoffPolicy *eventingv1.BackoffPolicyType, 
 	}
 }
 
+// WithTriggerBackoffMax sets the maximum retry backoff duration on a Trigger.
+func WithTriggerBackoffMax(backoffMax string) TriggerOption {
+	return func(t *v1.Trigger) {
+		if t.Spec.Delivery == nil {
+			t.Spec.Delivery = new(eventingv1.DeliverySpec)
+		}
+		t.Spec.Delivery.BackoffMax = ptr.String(backoffMax)
+	}
+}
+
 func WithTriggerSubscriberRef(gvk metav1.GroupVersionKind, name, namespace string) TriggerOption {
 	return func(t *v1.Trigger) {
 		t.Spec.Subscriber = duckv1.Destination{
